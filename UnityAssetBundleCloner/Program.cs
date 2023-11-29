@@ -20,8 +20,6 @@ namespace UnityAssetBundleCloner
 
             string outputDir = Environment.CurrentDirectory + "\\Output";
             string tempDir = Environment.CurrentDirectory + "\\Temp";
-            Dictionary<string, string> cabNames = new();
-            Dictionary<string, string> assetBundleNames = new();
             Random rng = new();
 
             OpenFileDialog aaofd = new()
@@ -44,60 +42,47 @@ namespace UnityAssetBundleCloner
             string projectName = mainAssetBundleDir.Split('\\').First();
             string mainAssetBundleName = mainAssetBundleDir[(projectName.Length + 1)..];
 
+            OpenFileDialog csvofd = new()
+            {
+                Filter = "Comma-separated values file(*.csv)|*.csv",
+                RestoreDirectory = true
+            };
+            if (csvofd.ShowDialog() != DialogResult.OK) return;
+            string csvPath = csvofd.FileName;
+            List<string> listOfNames = GetListOfNames(csvPath);
+
             AssetBundleDownloadManifest abdm = AssetBundleDownloadManifest.Load(assetAssistantPath);
             HashSet<string> assetPaths = abdm.records.SelectMany(abr => abr.assetPaths).ToHashSet();
-            List<AssetBundleRecord> abrs = abdm.GetAssetBundleRecordsWithDependencies(mainAssetBundleName.Replace('\\', '/'), true).Where(abr => abr.projectName == projectName).ToList();
-            abrs.Sort((abr0, abr1) => abr0.allDependencies.Length.CompareTo(abr1.allDependencies.Length));
+            AssetBundleRecord abr = abdm.GetAssetBundleRecord(mainAssetBundleName.Replace('\\', '/'));
             AssetsManager am = new();
-            BundleFileInstance[] bfis = abrs.Select(abr => am.LoadBundleFile(assetAssistantDir + "\\" + projectName + "\\" + abr.assetBundleName)).ToArray();
-            for (int i = 0; i < abrs.Count; i++)
-            {
-                AssetBundleRecord abr = abrs[i];
-                BundleFileInstance bfi = bfis[i];
-                DecompressBundle(bfi);
-                AssetsFileInstance afi = am.LoadAssetsFileFromBundle(bfi, 0);
-                cabNames[afi.name.Replace("CAB-", "")] = GenCABName(rng);
-                string newAssetBundleName = abr.assetBundleName;
-                do
-                {
-                    TextInputForm tip = new("AssetBundle Name", "Input new assetbundle name:", abr.assetBundleName);
-                    tip.ShowDialog();
-                    newAssetBundleName = tip.OutString;
-                    if (newAssetBundleName == abr.assetBundleName)
-                        MessageBox.Show("Name cannot be the same as the old one.\nInput another assetbundle name.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                } while (newAssetBundleName == abr.assetBundleName);
-                assetBundleNames[abr.assetBundleName] = newAssetBundleName;
-            }
+            BundleFileInstance bfi = am.LoadBundleFile(assetAssistantDir + "\\" + projectName + "\\" + abr.assetBundleName);
+            DecompressBundle(bfi);
+            AssetsFileInstance afi = am.LoadAssetsFileFromBundle(bfi, 0);
+            
 
-            for (int i = 0; i < abrs.Count; i++)
+            foreach (string name in listOfNames)
             {
-                AssetBundleRecord abr = abrs[i];
+                string newAssetBundleName = name;
+                string newCab = GenCABName(rng);
+
                 AssetBundleRecord newRecord = (AssetBundleRecord)abr.Clone();
-                newRecord.assetBundleName = assetBundleNames[newRecord.assetBundleName];
+                newRecord.assetBundleName = newAssetBundleName;
 
                 for (int j = 0; j < newRecord.assetPaths.Length; j++)
-                    while (assetPaths.Contains(newRecord.assetPaths[j]))
-                        newRecord.assetPaths[j] = IncrementName(newRecord.assetPaths[j]);
-
-                for (int j = 0; j < newRecord.allDependencies.Length; j++)
-                    if (assetBundleNames.ContainsKey(newRecord.allDependencies[j]))
-                        newRecord.allDependencies[j] = assetBundleNames[newRecord.allDependencies[j]];
+                {
+                    string[] oldPathParts = newRecord.assetPaths[j].Split("/");
+                    string bundleName = oldPathParts.Last();
+                    string newPath = string.Join("/", oldPathParts.Take(oldPathParts.Length - 1));
+                    newRecord.assetPaths[j] = newPath + "/" + newAssetBundleName.Split("/").Last() + ".prefab";
+                }
 
                 abdm.Add(newRecord);
 
-                BundleFileInstance bfi = bfis[i];
                 List<AssetsReplacer> ars = new();
-                AssetsFileInstance afi = am.LoadAssetsFileFromBundle(bfi, 0);
                 string oldCAB = afi.name.Replace("CAB-", "");
-                afi.name = afi.name.Replace(oldCAB, cabNames[oldCAB]);
+                afi.name = afi.name.Replace(oldCAB, newCab);
                 foreach (AssetBundleDirectoryInfo06 abdi6 in bfi.file.bundleInf6.dirInf)
-                    abdi6.name = abdi6.name.Replace(oldCAB, cabNames[oldCAB]);
-                foreach (AssetsFileDependency afd in afi.file.dependencies.dependencies)
-                {
-                    string cab = afd.assetPath.Replace("CAB-", "");
-                    if (cabNames.ContainsKey(cab))
-                        afd.assetPath = afd.assetPath.Replace(cab, cabNames[cab]);
-                }
+                    abdi6.name = abdi6.name.Replace(oldCAB, newCab);
 
                 List<AssetTypeValueField> texture2Ds = afi.table.GetAssetsOfType((int)AssetClassID.Texture2D).Select(afie => am.GetTypeInstance(afi, afie).GetBaseField()).ToList();
                 foreach (AssetTypeValueField texture2DField in texture2Ds)
@@ -106,7 +91,7 @@ namespace UnityAssetBundleCloner
                     AssetFileInfoEx afie = afi.table.GetAssetInfo(m_Name, (int)AssetClassID.Texture2D);
 
                     string m_StreamDataPath = texture2DField["m_StreamData"].children[2].value.AsString();
-                    m_StreamDataPath = m_StreamDataPath.Replace(oldCAB, cabNames[oldCAB]);
+                    m_StreamDataPath = m_StreamDataPath.Replace(oldCAB, newCab);
                     texture2DField["m_StreamData"].children[2].GetValue().Set(m_StreamDataPath);
 
                     byte[] b = texture2DField.WriteToByteArray();
@@ -120,7 +105,7 @@ namespace UnityAssetBundleCloner
                 AssetsFileWriter afw = new(memoryStream);
                 afi.file.dependencies.Write(afw);
                 afi.file.Write(afw, 0, ars, 0);
-                BundleReplacerFromMemory brfm = new(bfi.file.bundleInf6.dirInf[0].name, "CAB-" + cabNames[oldCAB], true, memoryStream.ToArray(), -1);
+                BundleReplacerFromMemory brfm = new(bfi.file.bundleInf6.dirInf[0].name, "CAB-" + newCab, true, memoryStream.ToArray(), -1);
 
                 string tempAssetBundlePath = tempDir + "\\" + newRecord.projectName + "\\" + newRecord.assetBundleName;
                 string outputAssetBundlePath = outputDir + "\\" + newRecord.projectName + "\\" + newRecord.assetBundleName;
@@ -143,7 +128,7 @@ namespace UnityAssetBundleCloner
             }
 
             abdm.Save(outputDir + "\\" + Path.GetFileName(assetAssistantPath));
-            MessageBox.Show("Result placed in Output folder.", "Success!", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show("Results placed in Output folder.", "Success!", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private static string IncrementName(string s)
@@ -179,6 +164,24 @@ namespace UnityAssetBundleCloner
             }
 
             return string.Join("", values);
+        }
+
+        private static List<string> GetListOfNames(string file)
+        {
+            List<string> list = new List<string>();
+
+            using (var reader = new StreamReader(file))
+            {
+
+                while (!reader.EndOfStream)
+                {
+                    var line = reader.ReadLine();
+
+                    list.Add(line);
+                }
+            }
+
+            return list;
         }
     }
 }
